@@ -1,0 +1,29 @@
+# Compiled binaries
+/s3backup
+/s3mount
+
+# Test and coverage artifacts
+*.test
+*.out
+*.prof
+coverage.txt
+
+# Dependency directories
+vendor/
+
+# Go Workspace
+go.work
+go.work.sum
+
+# OS and IDE specific
+.DS_Store
+.idea/
+.vscode/
+
+# Environment Files (Credentials)
+.env
+.env.local
+
+# Temporary Files from mmap cache
+/tmp/s3bu-dirdata-*
+/tmp/s3mount-dircache-*
