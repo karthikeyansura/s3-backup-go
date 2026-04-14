@@ -2,7 +2,6 @@ package mount
 
 import (
 	"context"
-	"fmt"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -36,104 +35,29 @@ type Config struct {
 }
 
 // NewS3FS creates a new FUSE filesystem from a backup object.
-func NewS3FS(ctx context.Context, cfg Config) (*S3FS, error) {
-	st := cfg.Store
-
-	sbData, err := st.GetRange(ctx, cfg.ObjectKey, 0, 4096)
+func NewS3FS(ctx context.Context, cfg Config) (_ *S3FS, retErr error) {
+	arch, err := OpenArchive(ctx, cfg.Store, cfg.ObjectKey, cfg.Verbose)
 	if err != nil {
-		return nil, fmt.Errorf("mount: read superblock: %w", err)
+		return nil, err
 	}
-
-	sb, err := s3fs.ParseSuperblock(sbData)
-	if err != nil {
-		return nil, fmt.Errorf("mount: parse superblock: %w", err)
-	}
-
-	nvers := int(sb.NVers)
-	names := sb.VersionNames()
-
-	nsectors := make([]int64, nvers)
-	uuids := sb.VersionUUIDs()
-	for i := 0; i < nvers; i++ {
-		size, err := st.Size(ctx, names[i])
-		if err != nil {
-			return nil, fmt.Errorf("mount: size %s: %w", names[i], err)
+	defer func() {
+		if retErr != nil {
+			_ = arch.Close()
 		}
-		nsectors[i] = size / 512
-
-		vsbData, err := st.GetRange(ctx, names[i], 0, 4096)
-		if err != nil {
-			return nil, fmt.Errorf("mount: read %s: %w", names[i], err)
-		}
-		vsb, err := s3fs.ParseSuperblock(vsbData)
-		if err != nil {
-			return nil, fmt.Errorf("mount: parse %s: %w", names[i], err)
-		}
-		if vsb.Versions[0].UUID != uuids[i] {
-			return nil, fmt.Errorf("mount: UUID mismatch for %s", names[i])
-		}
-	}
-
-	objSize, err := st.Size(ctx, cfg.ObjectKey)
-	if err != nil {
-		return nil, fmt.Errorf("mount: size: %w", err)
-	}
-	trailerData, err := st.GetRange(ctx, cfg.ObjectKey, objSize-512, 512)
-	if err != nil {
-		return nil, fmt.Errorf("mount: read trailer: %w", err)
-	}
-
-	rootDE, rootN, err := s3fs.ParseDirent(trailerData)
-	if err != nil {
-		return nil, fmt.Errorf("mount: parse root dirent: %w", err)
-	}
-
-	dirlocDE, dirlocN, err := s3fs.ParseDirent(trailerData[rootN:])
-	if err != nil {
-		return nil, fmt.Errorf("mount: parse dirloc dirent: %w", err)
-	}
-
-	dirdatDE, _, err := s3fs.ParseDirent(trailerData[rootN+dirlocN:])
-	if err != nil {
-		return nil, fmt.Errorf("mount: parse dirdat dirent: %w", err)
-	}
-
-	statfs := s3fs.ParseStatFS(trailerData[512-s3fs.StatFSSize:])
-
-	locData, err := st.GetRange(ctx, cfg.ObjectKey,
-		int64(dirlocDE.Offset.Sector())*512, int64(dirlocDE.Bytes))
-	if err != nil {
-		return nil, fmt.Errorf("mount: read dirlocs: %w", err)
-	}
-	locs := s3fs.ParseDirLocs(locData)
-
-	dirData, err := st.GetRange(ctx, cfg.ObjectKey,
-		int64(dirdatDE.Offset.Sector())*512, int64(dirdatDE.Bytes))
-	if err != nil {
-		return nil, fmt.Errorf("mount: read dirdata: %w", err)
-	}
-
-	dirCache, err := NewDirCache(locs, dirData)
-	if err != nil {
-		return nil, fmt.Errorf("mount: create dircache: %w", err)
-	}
+	}()
 
 	var dataCache *DataCache
 	if !cfg.NoCache {
-		dataCache = NewDataCache(st)
-	}
-
-	if cfg.Verbose {
-		fmt.Printf("mounted: %d versions, %d directories\n", nvers, len(locs))
+		dataCache = NewDataCache(cfg.Store)
 	}
 
 	return &S3FS{
-		store:     st,
-		names:     names,
-		nsectors:  nsectors,
-		rootDE:    rootDE,
-		statfs:    statfs,
-		dirCache:  dirCache,
+		store:     cfg.Store,
+		names:     arch.Names,
+		nsectors:  arch.NSectors,
+		rootDE:    arch.RootDE,
+		statfs:    arch.Statfs,
+		dirCache:  arch.DirCache,
 		dataCache: dataCache,
 		noCache:   cfg.NoCache,
 	}, nil
@@ -161,13 +85,11 @@ var _ = (fs.NodeOpener)((*S3Node)(nil))
 var _ = (fs.NodeReader)((*S3Node)(nil))
 var _ = (fs.NodeReadlinker)((*S3Node)(nil))
 
-// Getattr returns file attributes.
 func (n *S3Node) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	dirent2attr(&n.de, &out.Attr)
 	return 0
 }
 
-// Lookup finds a child entry in a directory.
 func (n *S3Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if n.de.Mode&syscall.S_IFDIR == 0 {
 		return nil, syscall.ENOTDIR
@@ -192,7 +114,6 @@ func (n *S3Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	return inode, 0
 }
 
-// Readdir lists directory contents.
 func (n *S3Node) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 	if n.de.Mode&syscall.S_IFDIR == 0 {
 		return nil, syscall.ENOTDIR
@@ -218,12 +139,10 @@ func (n *S3Node) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(entries), 0
 }
 
-// Open opens a file.
 func (n *S3Node) Open(_ context.Context, _ uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	return nil, fuse.FOPEN_KEEP_CACHE, 0
 }
 
-// Read reads data from a file.
 func (n *S3Node) Read(ctx context.Context, _ fs.FileHandle, dest []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
 	if n.de.Mode&syscall.S_IFREG == 0 {
 		return nil, syscall.EISDIR
@@ -261,7 +180,6 @@ func (n *S3Node) Read(ctx context.Context, _ fs.FileHandle, dest []byte, offset 
 	return fuse.ReadResultData(buf), 0
 }
 
-// Readlink reads a symbolic link target.
 func (n *S3Node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	if n.de.Mode&syscall.S_IFLNK == 0 {
 		return nil, syscall.EINVAL
@@ -287,13 +205,11 @@ var _ = (fs.NodeReaddirer)((*S3FS)(nil))
 var _ = (fs.NodeLookuper)((*S3FS)(nil))
 var _ = (fs.NodeStatfser)((*S3FS)(nil))
 
-// Getattr for the root directory.
 func (f *S3FS) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	dirent2attr(&f.rootDE, &out.Attr)
 	return 0
 }
 
-// Lookup for the root directory.
 func (f *S3FS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	dirData := f.dirCache.FindDir(f.rootDE.Offset, f.rootDE.Bytes)
 	if dirData == nil {
@@ -314,7 +230,6 @@ func (f *S3FS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	return inode, 0
 }
 
-// Readdir for the root directory.
 func (f *S3FS) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 	dirData := f.dirCache.FindDir(f.rootDE.Offset, f.rootDE.Bytes)
 	if dirData == nil {
@@ -336,7 +251,6 @@ func (f *S3FS) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(entries), 0
 }
 
-// Statfs returns filesystem statistics.
 func (f *S3FS) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
 	out.Bsize = 512
 	out.Frsize = 512
