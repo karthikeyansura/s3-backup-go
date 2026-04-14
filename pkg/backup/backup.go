@@ -42,7 +42,7 @@ type Result struct {
 type dirCache map[uint64][]byte
 
 // Run executes a full or incremental backup.
-func Run(ctx context.Context, cfg Config) (*Result, error) {
+func Run(ctx context.Context, cfg Config) (result *Result, retErr error) {
 	if cfg.Tag == "" {
 		cfg.Tag = "--root--"
 	}
@@ -54,7 +54,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backup: create output: %w", err)
 	}
-	defer func() { _ = w.Close() }()
+	defer func() {
+		cerr := w.Close()
+		if retErr == nil {
+			retErr = cerr
+		}
+	}()
 
 	sw := NewSectorWriter(w, cfg.NoIO)
 	cache := make(dirCache)
