@@ -1,11 +1,12 @@
 package store
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -72,45 +73,75 @@ func (s *S3Store) Size(ctx context.Context, key string) (int64, error) {
 	return info.Size, nil
 }
 
-// NewWriter initializes a new buffered writer for an S3 object.
+// uploadBufSize is the buffering layer between backup traversal writes (often
+// small, 512-byte sector-aligned chunks) and the pipe feeding PutObject.
+// Batching into 1 MiB reduces write syscall overhead significantly.
+const uploadBufSize = 1 << 20
+
+// NewWriter streams data to S3 via multipart upload. A 1 MiB bufio.Writer sits
+// between the caller and an io.Pipe; PutObject reads the pipe with size=-1 so
+// minio-go handles automatic multipart chunking. The backup never needs to hold
+// the entire object in RAM.
 func (s *S3Store) NewWriter(ctx context.Context, key string) (io.WriteCloser, error) {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := s.client.PutObject(
+			ctx,
+			s.bucket,
+			key,
+			pr,
+			-1,
+			minio.PutObjectOptions{
+				ContentType: "application/octet-stream",
+			},
+		)
+		if err != nil {
+			_ = pr.CloseWithError(err)
+		} else {
+			_ = pr.Close()
+		}
+		done <- err
+	}()
+
 	return &s3Writer{
-		ctx:   ctx,
-		store: s,
 		key:   key,
-		buf:   &bytes.Buffer{},
+		rawPw: pw,
+		bufw:  bufio.NewWriterSize(pw, uploadBufSize),
+		done:  done,
 	}, nil
 }
 
 type s3Writer struct {
-	ctx   context.Context
-	store *S3Store
-	key   string
-	buf   *bytes.Buffer
+	key       string
+	rawPw     *io.PipeWriter
+	bufw      *bufio.Writer
+	done      chan error
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// Write appends data to the internal memory buffer.
 func (w *s3Writer) Write(p []byte) (int, error) {
-	return w.buf.Write(p)
+	return w.bufw.Write(p)
 }
 
-// Close executes the multipart upload of the buffered data to S3.
 func (w *s3Writer) Close() error {
-	reader := bytes.NewReader(w.buf.Bytes())
-	size := int64(w.buf.Len())
-
-	_, err := w.store.client.PutObject(
-		w.ctx,
-		w.store.bucket,
-		w.key,
-		reader,
-		size,
-		minio.PutObjectOptions{
-			ContentType: "application/octet-stream",
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("store: upload %s: %w", w.key, err)
-	}
-	return nil
+	w.closeOnce.Do(func() {
+		if err := w.bufw.Flush(); err != nil {
+			_ = w.rawPw.CloseWithError(err)
+			if uerr := <-w.done; uerr != nil {
+				w.closeErr = fmt.Errorf("store: flush %s: %w (upload: %v)", w.key, err, uerr)
+				return
+			}
+			w.closeErr = fmt.Errorf("store: flush %s: %w", w.key, err)
+			return
+		}
+		if err := w.rawPw.Close(); err != nil {
+			w.closeErr = err
+			return
+		}
+		w.closeErr = <-w.done
+	})
+	return w.closeErr
 }
