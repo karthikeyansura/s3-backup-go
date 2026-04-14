@@ -344,7 +344,7 @@ func unchanged(old *s3fs.Dirent, info fs.FileInfo) bool {
 func (s *backupState) isExcluded(dir, file string) bool {
 	full := filepath.Join(dir, file)
 	for _, pattern := range s.cfg.Exclude {
-		if pattern == full {
+		if pattern == full || pattern == file || pattern == filepath.Base(file) {
 			return true
 		}
 	}
@@ -543,6 +543,16 @@ func loadPriorBackup(ctx context.Context, cfg Config, cache dirCache) ([]s3fs.Ve
 	}
 
 	names := oldSB.VersionNames()
+	// The superblock stores version names as basenames. For local file mode,
+	// resolve them relative to the directory containing the old backup object.
+	baseDir := filepath.Dir(cfg.OldName)
+	for i, raw := range names {
+		if filepath.Base(cfg.OldName) == raw {
+			names[i] = cfg.OldName
+		} else {
+			names[i] = filepath.Join(baseDir, raw)
+		}
+	}
 	for i, v := range oldSB.Versions {
 		name := names[len(names)-1-i]
 		if err := verifyUUID(ctx, cfg.Store, name, v.UUID); err != nil {
