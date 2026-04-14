@@ -26,4 +26,12 @@ go.work.sum
 
 # Temporary Files from mmap cache
 /tmp/s3bu-dirdata-*
-/tmp/s3mount-dircache-*
+/tmp/s3mount-dircache-*s3backup
+
+# Built binaries
+s3backup
+s3mount
+s3check
+
+# Test artifacts
+*.img
