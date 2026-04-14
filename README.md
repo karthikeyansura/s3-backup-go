@@ -42,7 +42,7 @@ During backup, the directory tree traversal handles these cases:
 - S3 hostname, access key, and secret key can be provided by flags as well as environment variables
 - The `--local` flag forces object names to be interpreted as local file paths, for debugging without an S3 endpoint
 - `--max SIZE` stops backup after a given amount of data (K/M/G suffixes accepted), allowing large full backups to be split into a chain of smaller objects. Files are not broken across backups, so the limit is soft.
-- `--exclude` skips directories or files matching a path, e.g. excluding `.ssh` to avoid archiving SSH keys
+- `--exclude` skips directories or files matching a path or basename, e.g. excluding `.ssh` to avoid archiving SSH keys
 
 ## Validation and Comparison Tools
 
@@ -81,7 +81,7 @@ Compares a backup object against a live directory tree, reporting all difference
 
 ## Building
 
-Requires Go 1.22 or later. No C dependencies are needed for `s3backup` or `s3check`; `s3mount` requires FUSE support ([macFUSE](https://macfuse.github.io/) on macOS, `libfuse-dev` on Linux).
+Requires Go 1.22 or later. No C dependencies are needed for `s3backup` or `s3check`; `s3mount` requires a FUSE implementation.
 
 ```bash
 go mod tidy
@@ -90,15 +90,26 @@ go build ./cmd/s3mount
 go build ./cmd/s3check
 ```
 
+### FUSE Prerequisites
+
+`s3mount` requires a userspace FUSE driver. The `go-fuse` library used here interfaces directly with the kernel FUSE device, so a driver that provides `/dev/fuse` (or equivalent) and a mount helper is required.
+
+- **macOS**: [macFUSE](https://macfuse.github.io/) (v5+). Apple Silicon machines require enabling third-party kernel extensions via Recovery Mode (Reduced Security policy) on first install. See the [macFUSE Getting Started guide](https://github.com/macfuse/macfuse/wiki/Getting-Started) for platform-specific steps.
+- **Linux**: `libfuse-dev` (Debian/Ubuntu) or `fuse-devel` (RHEL/Fedora). No kernel configuration changes needed.
+
 ### Running Tests
 
 ```bash
 # Unit and integration tests
 go test ./...
 
-# Comprehensive local end-to-end smoke test
+# Local and S3 integration tests (56 assertions, includes MinIO via Docker Compose)
 chmod +x test_local.sh
 ./test_local.sh
+
+# FUSE mount verification (16 assertions, requires macFUSE or libfuse)
+chmod +x test_mount.sh
+./test_mount.sh
 ```
 
 The test suite covers:
@@ -107,7 +118,9 @@ The test suite covers:
 - End-to-end backup + superblock/trailer verification (`pkg/backup`)
 - Structural fsck on local backup images (`pkg/fsck`)
 - Backup-vs-original comparison including content mutation, new file, and deleted file detection (`pkg/compare`)
-- Local smoke test script exercising all three CLI tools across 10 scenarios
+- Local integration across 16 scenarios: sector boundary files (511, 512, 513 bytes), incremental backup chains, corruption detection (truncated, empty, garbage, bit-flipped images), 1000 small files, exclude verification, and 500MB scale tests (3x repeated)
+- S3 integration via MinIO Docker Compose: streaming multipart upload, fsck, and content verification over HTTP
+- FUSE mount verification: kernel read path, symlinks (relative and absolute), binary content, empty directories, read-only enforcement, and sector boundary file reads
 
 ## What Changed from the C Version
 
