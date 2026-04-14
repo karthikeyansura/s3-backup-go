@@ -81,7 +81,7 @@ Compares a backup object against a live directory tree, reporting all difference
 
 ## Building
 
-Requires Go 1.22 or later. No C dependencies are needed for `s3backup` or `s3check`; `s3mount` requires FUSE support ([FUSE-T](https://github.com/macos-fuse-t/fuse-t) on macOS, `libfuse-dev` on Linux).
+Requires Go 1.22 or later. No C dependencies are needed for `s3backup` or `s3check`; `s3mount` requires FUSE support ([macFUSE](https://macfuse.github.io/) on macOS, `libfuse-dev` on Linux).
 
 ```bash
 go mod tidy
