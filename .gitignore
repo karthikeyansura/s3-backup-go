@@ -1,4 +1,4 @@
-# Compiled binaries
+# Compiled binaries (root-anchored so cmd/ subdirs are not ignored)
 /s3backup
 /s3mount
 /s3check
@@ -8,6 +8,9 @@
 *.out
 *.prof
 coverage.txt
+
+# Test backup images
+*.img
 
 # Dependency directories
 vendor/
@@ -28,6 +31,3 @@ go.work.sum
 # Temporary Files from mmap cache
 /tmp/s3bu-dirdata-*
 /tmp/s3mount-dircache-*
-
-# Test artifacts
-*.img
